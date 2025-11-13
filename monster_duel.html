@@ -1,0 +1,313 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Monster Duel — Mini Turn-Based Battle</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial;background:linear-gradient(180deg,#0b1220,#021018);color:#e9f2f2;display:flex;align-items:center;justify-content:center;height:100vh}
+  #game{width:900px;max-width:95%;background:rgba(255,255,255,0.03);border-radius:12px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.6);}
+  canvas{background:#071021;border-radius:8px;display:block;margin:0 auto;box-shadow:inset 0 0 80px rgba(0,0,0,0.4)}
+  #ui{display:flex;gap:12px;margin-top:12px;align-items:flex-start}
+  #panel{flex:1;background:rgba(255,255,255,0.02);padding:12px;border-radius:8px}
+  .skills{display:flex;flex-wrap:wrap;gap:8px}
+  button.skill{background:linear-gradient(180deg,#223244,#14202b);border:1px solid rgba(255,255,255,0.04);padding:10px 12px;border-radius:8px;color:#eaf6f7;cursor:pointer;min-width:160px}
+  button.small{padding:6px 8px;min-width:80px}
+  .hpbar{height:14px;border-radius:8px;background:rgba(255,255,255,0.06);overflow:hidden}
+  .hpfill{height:100%;background:linear-gradient(90deg,#8ef0b2,#2ad48b);width:100%}
+  .enemy{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+  .log{max-height:120px;overflow:auto;font-size:13px;padding:6px;background:rgba(0,0,0,0.2);border-radius:6px}
+  .center{display:flex;justify-content:center;align-items:center}
+  .muted{opacity:0.7;font-size:13px}
+</style>
+</head>
+<body>
+<div id="game">
+  <canvas id="c" width="860" height="360"></canvas>
+  <div id="ui">
+    <div id="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div>
+          <div style="font-weight:700">Trainer</div>
+          <div class="hpbar" style="width:220px;margin-top:6px"><div id="playerHP" class="hpfill" style="width:100%"></div></div>
+          <div id="playerHPText" class="muted">HP: 100 / 100</div>
+        </div>
+        <div class="enemy">
+          <div style="font-weight:700">Wild Flaro</div>
+          <div class="hpbar" style="width:180px;margin-top:6px"><div id="enemyHP" class="hpfill" style="width:100%"></div></div>
+          <div id="enemyHPText" class="muted">HP: 100 / 100</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button class="small" id="btnSpeed">Speed: Normal</button>
+        <button class="small" id="btnRestart">Restart</button>
+      </div>
+      <div style="margin-bottom:8px"><strong>Choose a skill:</strong></div>
+      <div class="skills" id="skills"></div>
+    </div>
+    <div style="width:320px">
+      <div style="margin-bottom:8px"><strong>Battle Log</strong></div>
+      <div class="log" id="log"></div>
+      <div style="height:12px"></div>
+      <div style="margin-bottom:6px"><strong>Status</strong></div>
+      <div id="status" class="muted">Your monster is ready. Use skills to attack the enemy. Enemy picks a move each turn.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* Monster Duel — simplified Pokémon-like battle */
+/* Controls: click a skill to use it. Restart to play again. */
+
+/* Canvas drawing for simple sprites */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+/* Game State */
+let player = {
+  name: 'Aegis Pup',
+  maxHP: 100, hp:100,
+  stats: {atk:18, def:8, spd:12},
+  skills: [
+    {id:'ember', name:'Spark', power:18, acc:0.95, type:'fire', desc:'Small fire attack.'},
+    {id:'shield', name:'Shield Up', power:0, acc:1, type:'status', desc:'Raise defense for 2 turns.', dur:2, effect:{def:+6}},
+    {id:'bolt', name:'Volt Kick', power:26, acc:0.78, type:'electric', desc:'Risky heavy hit; may miss.'},
+    {id:'heal', name:'Heal Aura', power:0, acc:1, type:'status', desc:'Restore small HP instantly.', heal:22}
+  ]
+};
+
+let enemy = {
+  name:'Flaro',
+  maxHP: 100, hp:100,
+  stats:{atk:16, def:7, spd:10},
+  moves:[
+    {id:'flick', name:'Flicker', power:12, acc:0.96, type:'fire'},
+    {id:'lash', name:'Tail Lash', power:16, acc:0.92, type:'physical'},
+    {id:'ember', name:'Ember', power:20, acc:0.85, type:'fire'}
+  ]
+};
+
+let turnState = {busy:false, playerBuff:0, enemyBuff:0, playerDefTurns:0, enemyDefTurns:0};
+let logEl = document.getElementById('log');
+let skillsEl = document.getElementById('skills');
+let statusEl = document.getElementById('status');
+let btnSpeed = document.getElementById('btnSpeed');
+let btnRestart = document.getElementById('btnRestart');
+let speed = 1.0; // affects animation timing
+btnSpeed.onclick = ()=>{ if(speed===1.0){ speed=1.6; btnSpeed.textContent='Speed: Fast'; } else { speed=1.0; btnSpeed.textContent='Speed: Normal'; } };
+
+/* Audio feedback */
+const AudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function tone(freq, dur=0.18, vol=0.08){ const o = AudioCtx.createOscillator(); const g = AudioCtx.createGain(); o.type='sine'; o.frequency.value=freq; g.gain.value=vol; o.connect(g); g.connect(AudioCtx.destination); o.start(); g.gain.exponentialRampToValueAtTime(0.0001, AudioCtx.currentTime+dur); setTimeout(()=>o.stop(), dur*1000+50); }
+
+/* Utility */
+function rand(min,max){ return Math.floor(Math.random()*(max-min+1))+min; }
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+/* Log */
+function log(txt){ const p=document.createElement('div'); p.textContent = txt; logEl.prepend(p); }
+
+/* Draw simple scene */
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // background
+  const g = ctx.createLinearGradient(0,0,0,canvas.height);
+  g.addColorStop(0,'#08121b'); g.addColorStop(1,'#041018');
+  ctx.fillStyle = g; ctx.fillRect(0,0,canvas.width,canvas.height);
+  // enemy
+  ctx.save();
+  ctx.translate(620,80);
+  // enemy body
+  ctx.fillStyle = '#ff8c6b'; ctx.beginPath(); ctx.ellipse(0,40,60,48,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#2b1410'; ctx.fillRect(-10,10,20,8); // eyes stripe
+  ctx.fillStyle='#ffd8b0'; ctx.beginPath(); ctx.arc(-18,34,8,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(18,34,8,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+  // player
+  ctx.save();
+  ctx.translate(180,220);
+  ctx.fillStyle='#7fd4ff'; ctx.beginPath(); ctx.ellipse(0,-20,56,44,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#0b2130'; ctx.fillRect(-12,-54,24,10);
+  ctx.fillStyle='#ffffff'; ctx.beginPath(); ctx.arc(-16,-28,6,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(12,-28,6,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+  // text
+  ctx.fillStyle='#cde7e9'; ctx.font='18px system-ui'; ctx.fillText(player.name,120,320);
+  ctx.fillText(enemy.name,520,80);
+}
+draw();
+
+/* Update HP UI */
+function refreshHP(){
+  const pPct = Math.round(player.hp / player.maxHP * 100);
+  const ePct = Math.round(enemy.hp / enemy.maxHP * 100);
+  document.getElementById('playerHP').style.width = pPct + '%';
+  document.getElementById('enemyHP').style.width = ePct + '%';
+  document.getElementById('playerHPText').textContent = 'HP: ' + player.hp + ' / ' + player.maxHP;
+  document.getElementById('enemyHPText').textContent = 'HP: ' + enemy.hp + ' / ' + enemy.maxHP;
+}
+
+/* Build skill buttons */
+function buildSkills(){
+  skillsEl.innerHTML='';
+  player.skills.forEach((s, idx)=>{
+    const b = document.createElement('button');
+    b.className='skill';
+    b.innerHTML = `<div style="font-weight:800">${s.name}</div><div style="font-size:12px" class="muted">${s.desc}</div>`;
+    b.onclick = ()=>{ if(turnState.busy) return; playerUseSkill(idx); };
+    skillsEl.appendChild(b);
+  });
+}
+buildSkills();
+
+/* Turn: player uses skill */
+function playerUseSkill(idx){
+  const skill = player.skills[idx];
+  turnState.busy = true;
+  statusEl.textContent = 'Player used ' + skill.name + '!';
+  log('You choose ' + skill.name + '.');
+  // audio cue
+  tone(220 + skill.power*5, 0.15, 0.08);
+  setTimeout(()=>{
+    executeSkill(player, enemy, skill, ()=>{
+      // after player's move, check end
+      if(checkBattleEnd()) return;
+      // enemy turn after a short delay
+      setTimeout(enemyTurn, 700 / speed);
+    });
+  }, 400 / speed);
+}
+
+/* Enemy AI */
+function enemyTurn(){
+  const move = enemy.moves[rand(0, enemy.moves.length-1)];
+  statusEl.textContent = 'Enemy used ' + move.name + '!';
+  log('Enemy uses ' + move.name + '.');
+  tone(120 + move.power*4, 0.14, 0.07);
+  setTimeout(()=>{
+    executeSkill(enemy, player, move, ()=>{
+      if(checkBattleEnd()) return;
+      turnState.busy = false;
+      statusEl.textContent = 'Choose your next skill.';
+    });
+  }, 500 / speed);
+}
+
+/* Skill execution: handles damage, status, heal */
+function executeSkill(attacker, target, skill, cb){
+  // hit roll
+  const hitRoll = Math.random();
+  if(skill.acc !== undefined && hitRoll > skill.acc){
+    log(skill.name + ' missed!');
+    // subtle visual flash
+    flash('#ffffff', 80);
+    cb();
+    return;
+  }
+  // heal skill
+  if(skill.heal){
+    const amount = skill.heal;
+    if(attacker === player){
+      player.hp = clamp(player.hp + amount, 0, player.maxHP);
+      refreshHP();
+      log('You restored ' + amount + ' HP.');
+      tone(520, 0.12, 0.06);
+    } else {
+      enemy.hp = clamp(enemy.hp + amount, 0, enemy.maxHP);
+      refreshHP();
+      log('Enemy healed ' + amount + ' HP.');
+    }
+    cb();
+    return;
+  }
+  // status buff
+  if(skill.type === 'status' && skill.effect){
+    if(attacker === player){
+      turnState.playerDefTurns = (skill.dur || 2);
+      log('Player defense rose for ' + (skill.dur||2) + ' turns.');
+    } else {
+      turnState.enemyDefTurns = (skill.dur || 2);
+      log('Enemy defense rose for ' + (skill.dur||2) + ' turns.');
+    }
+    cb();
+    return;
+  }
+  // damage calc: simple formula: (power + atk) - (def + (defBuff))
+  let atkStat = attacker.stats.atk;
+  let defStat = target.stats.def;
+  if(target === player && turnState.playerDefTurns>0) defStat += 6;
+  if(target === enemy && turnState.enemyDefTurns>0) defStat += 6;
+  let base = skill.power + atkStat - Math.round(defStat * 0.6);
+  base = Math.max(4, base + rand(-4,4)); // variance
+  // type interactions (simple): fire strong vs physical? keep neutral
+  // random critical
+  const crit = (Math.random() < 0.08) ? 1.5 : 1.0;
+  const dmg = Math.round(base * crit);
+  target.hp = clamp(target.hp - dmg, 0, target.maxHP);
+  refreshHP();
+  if(crit>1){ log('A critical hit!'); tone(980, 0.12, 0.12); flash('#fffbcc', 160); }
+  log((attacker===player? 'You' : 'Enemy') + ' dealt ' + dmg + ' damage with ' + skill.name + '.');
+  flash(attacker===player? '#a0ffd8' : '#ffb0b0', 120);
+  // decrement buff durations
+  if(turnState.playerDefTurns>0){ turnState.playerDefTurns--; if(turnState.playerDefTurns===0) log('Player defense boost wore off.'); }
+  if(turnState.enemyDefTurns>0){ turnState.enemyDefTurns--; if(turnState.enemyDefTurns===0) log('Enemy defense boost wore off.'); }
+  cb();
+}
+
+/* Visual flash helper */
+function flash(color, ms=150){
+  const old = canvas.style.boxShadow;
+  canvas.style.boxShadow = `0 0 40px ${color}`;
+  setTimeout(()=>{ canvas.style.boxShadow = old; }, ms/speed);
+}
+
+/* Check end of battle */
+function checkBattleEnd(){
+  if(enemy.hp <= 0){
+    log('Enemy fainted! You win!');
+    statusEl.textContent = 'Victory — You won the duel!';
+    tone(1200, 0.5, 0.09);
+    turnState.busy = true;
+    setTimeout(()=>{ showEnding(true); }, 600/speed);
+    return true;
+  }
+  if(player.hp <= 0){
+    log('You fainted...');
+    statusEl.textContent = 'Defeat — Your monster fainted.';
+    tone(120, 0.6, 0.09);
+    turnState.busy = true;
+    setTimeout(()=>{ showEnding(false); }, 600/speed);
+    return true;
+  }
+  return false;
+}
+
+/* Ending screens (simple) */
+function showEnding(victory){
+  const overlay = document.createElement('div');
+  overlay.style.position='fixed'; overlay.style.inset='0'; overlay.style.display='flex'; overlay.style.alignItems='center'; overlay.style.justifyContent='center';
+  overlay.style.background='linear-gradient(180deg, rgba(0,0,0,0.6), rgba(0,0,0,0.9))';
+  overlay.style.zIndex=9999;
+  const card = document.createElement('div');
+  card.style.background='linear-gradient(180deg,#0b2230,#03101a)'; card.style.padding='20px'; card.style.borderRadius='12px'; card.style.width='420px'; card.style.textAlign='center';
+  card.innerHTML = `<div style="font-size:20px;font-weight:800">${victory? 'Victory!' : 'Defeat'}</div><div style="margin-top:12px">` + (victory? 'Flaro has been defeated. You proved your skills.' : 'Your monster needs rest. Train harder!') + `</div>`;
+  const r = document.createElement('button'); r.textContent='Play Again'; r.className='skill'; r.style.marginTop='14px'; r.onclick=()=>{ location.reload(); };
+  card.appendChild(r);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+}
+
+/* Restart button */
+btnRestart.onclick = ()=>{ location.reload(); };
+
+/* ensure audio unlock */
+window.addEventListener('pointerdown', ()=>{ if(AudioCtx.state === 'suspended') AudioCtx.resume(); }, {once:true});
+
+/* Init */
+refreshHP();
+log('A wild ' + enemy.name + ' appears!');
+statusEl.textContent = 'Battle started. Choose a skill.';
+
+</script>
+</body>
+</html>
